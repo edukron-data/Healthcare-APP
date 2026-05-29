@@ -1,0 +1,248 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  azureServiceConnection: 'AzureServiceConnection'
+  azureContainerRegistry: 'myacr'
+  imageName: 'healthcare-app'
+  imageTag: '$(Build.SourceVersion)'
+  acrLoginServer: 'myacr.azurecr.io'
+  aksResourceGroupDev: 'rg-healthcare-dev'
+  aksClusterNameDev: 'aks-healthcare-dev'
+  aksResourceGroupProd: 'rg-healthcare-prod'
+  aksClusterNameProd: 'aks-healthcare-prod'
+  helmReleaseName: 'healthcare-app'
+  helmChartPath: 'charts/healthcare-app'
+  helmNamespaceDev: 'healthcare-dev'
+  helmNamespaceProd: 'healthcare-prod'
+  azAdClientId: ''
+  terraformWorkingDirectory: 'terraform/azure'
+  tfstateResourceGroup: 'rg-terraform'
+  tfstateStorageAccount: 'tfstatehealthcare'
+  tfstateContainer: 'tfstate'
+  tfstateKey: 'healthcare-azure.tfstate'
+
+stages:
+  - stage: Validate
+    displayName: 'Validate: Lint / Test / Security'
+    jobs:
+      - job: Validation
+        displayName: 'Code validation'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install ruff pytest semgrep pip-audit trufflehog
+            displayName: 'Install Python tooling'
+
+          - script: |
+              ruff check .
+            displayName: 'Lint Python code'
+
+          - script: |
+              pytest -q
+            displayName: 'Run unit tests'
+
+          - script: |
+              semgrep --config auto .
+            displayName: 'Run SAST with Semgrep'
+
+          - script: |
+              pip-audit --progress=off --exit-code 1
+            displayName: 'Dependency scan with pip-audit'
+
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: '1.5.8'
+            displayName: 'Install Terraform'
+
+          - script: |
+              cd $(terraformWorkingDirectory)
+              terraform fmt -check
+              terraform init -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                -backend-config="container_name=$(tfstateContainer)" \
+                -backend-config="key=$(tfstateKey)"
+              terraform validate
+            displayName: 'Terraform format and validate'
+
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+              tfsec $(Build.SourcesDirectory)/terraform/azure
+            displayName: 'IaC scan with tfsec'
+
+          - script: |
+              trufflehog filesystem --entropy=False .
+            displayName: 'Secret scan with TruffleHog'
+
+  - stage: BuildAndPush
+    displayName: 'Build and Push Image'
+    dependsOn: Validate
+    jobs:
+      - job: BuildImage
+        displayName: 'Docker build and push'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: 'Install app dependencies'
+
+          - script: |
+              docker build -t $(imageName):$(imageTag) .
+            displayName: 'Build Docker image'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az acr login --name $(azureContainerRegistry)
+                docker tag $(imageName):$(imageTag) $(acrLoginServer)/$(imageName):$(imageTag)
+                docker push $(acrLoginServer)/$(imageName):$(imageTag)
+            displayName: 'Push image to ACR'
+
+          - script: |
+              curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+              trivy image --exit-code 1 --severity CRITICAL $(acrLoginServer)/$(imageName):$(imageTag)
+            displayName: 'Container scan with Trivy'
+
+  - stage: TerraformPlan
+    displayName: 'Terraform Plan'
+    dependsOn: BuildAndPush
+    jobs:
+      - job: TerraformPlan
+        displayName: 'Terraform plan'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.12'
+              addToPath: true
+
+          - task: TerraformInstaller@0
+            inputs:
+              terraformVersion: '1.5.8'
+            displayName: 'Install Terraform'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: '$(azureServiceConnection)'
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                az account show
+                cd $(terraformWorkingDirectory)
+                terraform init -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                  -backend-config="container_name=$(tfstateContainer)" \
+                  -backend-config="key=$(tfstateKey)"
+                terraform plan -out=tfplan -var="environment=dev"
+            displayName: 'Terraform init and plan'
+
+  - stage: DeployDev
+    displayName: 'Deploy to Dev AKS'
+    dependsOn: TerraformPlan
+    jobs:
+      - deployment: DeployDev
+        displayName: 'Deploy to development AKS'
+        environment: 'dev-aks'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials --resource-group $(aksResourceGroupDev) --name $(aksClusterNameDev) --overwrite-existing
+                      az aks install-cli
+                      curl -fsSL https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz -o helm.tar.gz
+                      tar -zxvf helm.tar.gz
+                      sudo mv linux-amd64/helm /usr/local/bin/helm
+                      helm version
+                      helm upgrade --install $(helmReleaseName) $(helmChartPath) --namespace $(helmNamespaceDev) --create-namespace \
+                        --set image.repository=$(acrLoginServer)/$(imageName) \
+                        --set image.tag=$(imageTag) \
+                        --set serviceAccount.annotations.azure\.workload\.identity/client-id="$(azAdClientId)"
+                  displayName: 'Deploy Helm chart to AKS Dev'
+
+  - stage: Approval
+    displayName: 'Manual Approval for Prod'
+    dependsOn: DeployDev
+    jobs:
+      - job: WaitForApproval
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: ManualValidation@0
+            inputs:
+              instructions: 'Review the dev deployment, then approve production deployment.'
+              onTimeout: 'reject'
+              timeout: '1.00:00:00'
+
+  - stage: DeployProd
+    displayName: 'Deploy to Prod AKS'
+    dependsOn: Approval
+    jobs:
+      - deployment: DeployProd
+        displayName: 'Deploy to production AKS'
+        environment: 'prod-aks'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzureCLI@2
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials --resource-group $(aksResourceGroupProd) --name $(aksClusterNameProd) --overwrite-existing
+                      az aks install-cli
+                      curl -fsSL https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz -o helm.tar.gz
+                      tar -zxvf helm.tar.gz
+                      sudo mv linux-amd64/helm /usr/local/bin/helm
+                      helm version
+                      helm upgrade --install $(helmReleaseName) $(helmChartPath) --namespace $(helmNamespaceProd) --create-namespace \
+                        --set image.repository=$(acrLoginServer)/$(imageName) \
+                        --set image.tag=$(imageTag) \
+                        --set serviceAccount.annotations.azure\.workload\.identity/client-id="$(azAdClientId)"
+                  displayName: 'Deploy Helm chart to AKS Prod'
