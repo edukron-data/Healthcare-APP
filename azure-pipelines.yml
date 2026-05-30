@@ -80,10 +80,7 @@ stages:
               terraform fmt -check
               terraform init -backend-config="resource_group_name=$(tfstateResourceGroup)" \
                 -backend-config="storage_account_name=$(tfstateStorageAccount)" \
-                -backend-config="container_name=$(tfstateContainer)" \
-                -backend-config="key=$(tfstateKey)"
-              terraform validate
-            displayName: 'Terraform format and validate'
+                -backend-config="cont=falsedate'
 
           - script: |
               curl -sfL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
