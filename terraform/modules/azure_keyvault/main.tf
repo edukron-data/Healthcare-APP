@@ -5,7 +5,7 @@ resource "azurerm_key_vault" "kv" {
   tenant_id                   = var.tenant_id
   sku_name                    = "standard"
   purge_protection_enabled    = false
-  soft_delete_enabled         = true
+  soft_delete_retention_days  = 7
 }
 
 resource "azurerm_key_vault_secret" "db_password" {

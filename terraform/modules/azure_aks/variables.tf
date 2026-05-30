@@ -5,5 +5,3 @@ variable "node_count" { type = number }
 variable "node_vm_size" { type = string }
 variable "min_count" { type = number }
 variable "max_count" { type = number }
-variable "min_count" { type = number }
-variable "max_count" { type = number }

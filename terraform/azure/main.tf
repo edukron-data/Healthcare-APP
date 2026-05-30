@@ -3,7 +3,7 @@ provider "azurerm" {
 }
 
 module "network" {
-  source              = "../../modules/azure_network"
+  source              = "../modules/azure_network"
   resource_group_name = var.resource_group_name
   location            = var.location
   vnet_name           = var.vnet_name
@@ -13,7 +13,7 @@ module "network" {
 }
 
 module "acr" {
-  source              = "../../modules/azure_acr"
+  source              = "../modules/azure_acr"
   acr_name            = var.acr_name
   resource_group_name = module.network.resource_group_name
   location            = var.location
@@ -21,7 +21,7 @@ module "acr" {
 }
 
 module "keyvault" {
-  source              = "../../modules/azure_keyvault"
+  source              = "../modules/azure_keyvault"
   vault_name          = var.keyvault_name
   location            = var.location
   resource_group_name = module.network.resource_group_name
@@ -31,7 +31,7 @@ module "keyvault" {
 }
 
 module "postgres" {
-  source              = "../../modules/azure_postgres"
+  source              = "../modules/azure_postgres"
   server_name         = var.postgres_server_name
   resource_group_name = module.network.resource_group_name
   location            = var.location
@@ -44,7 +44,7 @@ module "postgres" {
 }
 
 module "aks" {
-  source              = "../../modules/azure_aks"
+  source              = "../modules/azure_aks"
   cluster_name        = var.aks_cluster_name
   location            = var.location
   resource_group_name = module.network.resource_group_name
